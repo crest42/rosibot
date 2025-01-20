@@ -1,15 +1,18 @@
 """Main Bot implementation
 """
+
+from typing import Callable
+
 import datetime
 import os
 import asyncio
 from pathlib import Path
 import logging
 
-from signalbot import SignalBot, Command, Context
+from signalbot import SignalBot, Command, Context  # type: ignore
 
-from messages import Messages
-from settings import Settings
+from rosibot.messages import Messages
+from rosibot.settings import Settings
 
 messages = Messages()
 BOT_COMMAND_DELIMITER = "!"
@@ -18,9 +21,9 @@ MONDAY = 0
 FRIDAY = 5
 LOCK_FILE_PATH = "/tmp"
 ROSIBOT_PREFIX = "[ROSIBOT]: "
-logger = logging.getLogger(__name__
-)
-logger.setLevel(logging.DEBUG)
+MAX_COMMAND_LENGTH = 128
+logger = logging.getLogger(__name__)
+
 
 def get_weekly_lock_file() -> tuple[int, int, str]:
     """Returns some ad-hoc date information used to handle file based locking
@@ -32,17 +35,66 @@ def get_weekly_lock_file() -> tuple[int, int, str]:
     file = f"{LOCK_FILE_PATH}/rosibot_{today.year}_{today.isocalendar().week}"
     return (today.weekday(), today.isocalendar().week, file)
 
+
+command_registry: dict[str, Callable] = {}
+
+
+def register_command(command):
+    """Adds a command and the proper handler function to a global registry"""
+    if command in command_registry:
+        raise RuntimeError(
+            f"Command {command} is already registered at {command_registry[command]}"
+        )
+
+    def _register(func):
+        command_registry[command] = func
+
+    return _register
+
+
 class RosiBot(Command):
     """RosiBot main implementation"""
 
     def __init__(self, settings: Settings) -> None:
         self.signal_group_id = settings.signal_group_id
         self.signal_bot = SignalBot(
-            {"signal_service": settings.signal_service, "phone_number": settings.phone_number}
+            {
+                "signal_service": settings.signal_service,
+                "phone_number": settings.phone_number,
+            }
         )
         self.register()
-        self.signal_bot._event_loop.create_task(self.periodic())  # pylint: disable=protected-access
+        self.signal_bot._event_loop.create_task(
+            self.periodic()
+        )  # pylint: disable=protected-access
 
+    async def _handle(self, text: str) -> None:
+        """Bot Command handler. Handles any bot command passed to it.
+
+        Valid Bot commands are supposed to look like: "!<command>"
+
+        Args:
+            text (str): Bot command
+        """
+        if text.startswith(BOT_COMMAND_DELIMITER):
+            if len(text) > MAX_COMMAND_LENGTH:
+                logger.error(
+                    f"Invalid Bot command. Length {len(text)} exceeds allowed length of {MAX_COMMAND_LENGTH}"
+                )
+                return
+            await self._handle_command(text.strip())
+        else:
+            logger.debug(
+                "Recieved Messages that does not appear to be a command. Do nothing"
+            )
+
+    async def _handle_command(self, command: str) -> None:
+
+        logger.debug(f"Received Bot command: {command}")
+        if command in command_registry:
+            await command_registry[command](self, command)
+        else:
+            logger.warning(f"Recieved unknown bot command '{command}'. Ignore")
 
     def register(self) -> None:
         """Wrapper for singalbots register function."""
@@ -50,7 +102,7 @@ class RosiBot(Command):
 
     def start(self) -> None:
         """Wrapper function to call signalbot's start function. Entrypoint to RosiBot"""
-        self.signal_bot.start() # type: ignore
+        self.signal_bot.start()  # type: ignore
 
     async def send(self, message: str) -> None:
         """Send a message to group defined in the settings. Prefixes all messages with a BOT identifier"""
@@ -63,42 +115,7 @@ class RosiBot(Command):
         Args:
             c (Context): Message context as send by signalbot
         """
-        if context.message.text.startswith(BOT_COMMAND_DELIMITER):
-            await self._handle(context.message.text)
-        else:
-            logger.error(f"Invalid bot command {context.message.text}. Do nothing")
-
-    async def _handle(self, text: str) -> None:
-        """Bot Command handler. Handles any bot command passed to it.
-
-        Valid Bot commands are supposed to look like: "!<command>"
-
-        Args:
-            text (str): Bot command
-        """
-        logger.debug(f"Received Bot command: {text}")
-        if text == "!hilfe":
-            message, _ = messages.get_command_message(text)
-            if message:
-                await self.send(message)
-        if text == "!erledigt":
-            message, fail = messages.get_command_message(text)
-            _, week, file = get_weekly_lock_file()
-            with open(file, "a", encoding="utf-8") as f:
-                f.seek(0, os.SEEK_END)
-                size = f.tell()
-                if size <= 1:
-                    logger.debug(
-                        f"Weekly maintenance for {week} done. Updating Log file"
-                    )
-                    f.write("Done")
-                    await self.send(message)
-                else:
-                    logger.debug(
-                        f"Weekly maintenance for {week} already done. Do nothing"
-                    )
-                    if fail:
-                        await self.send(fail)
+        await self._handle(context.message.text)
 
     async def periodic(self, seconds: int = 5) -> None:
         """Period Task used to send weekly reminders
@@ -143,3 +160,25 @@ class RosiBot(Command):
                     await self.send(message.format(KW=f"KW {week}"))
             i += 1
             await asyncio.sleep(seconds)
+
+    @register_command("!hilfe")
+    async def _handle_help(self, command: str):
+        message, _ = messages.get_command_message(command)
+        if message:
+            await self.send(message)
+
+    @register_command("!erledigt")
+    async def _handle_maintenance_done(self, command: str):
+        message, fail = messages.get_command_message(command)
+        _, week, file = get_weekly_lock_file()
+        with open(file, "a", encoding="utf-8") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size <= 1:
+                logger.debug(f"Weekly maintenance for {week} done. Updating Log file")
+                f.write("Done")
+                await self.send(message)
+            else:
+                logger.debug(f"Weekly maintenance for {week} already done. Do nothing")
+                if fail:
+                    await self.send(fail)

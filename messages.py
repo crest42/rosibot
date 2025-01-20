@@ -1,3 +1,5 @@
+"""Wrapper class to hold messages for certain command or periodic messages"""
+
 from typing import Optional
 import json
 import logging
@@ -94,4 +96,3 @@ class Messages:
         if command in self.commands:
             return (self.commands[command].success, self.commands[command].fail)
         raise RuntimeError(f"Could not find messages for command {command}")
-

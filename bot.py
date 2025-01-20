@@ -49,6 +49,7 @@ class RosiBot(Command):
         self.signal_bot.register(self, contacts=False, groups=[self.signal_group_id])
 
     def start(self) -> None:
+        """Wrapper function to call signalbot's start function. Entrypoint to RosiBot"""
         self.signal_bot.start() # type: ignore
 
     async def send(self, message: str) -> None:

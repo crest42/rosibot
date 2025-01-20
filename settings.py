@@ -1,3 +1,7 @@
+"""Main Settings Wrapper class, using pydantic settings.
+
+Mainly used to parse .env files or env variables and inject custom config into the bot.
+"""
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):

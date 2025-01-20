@@ -1,0 +1,13 @@
+{
+    "commands": {
+        "!hilfe": "Was genau bei einer Wartung getan werden muss steht in der Gruppenbeschreibung. Bei Fragen wende dich bitte an Teresa, Robin oder fragt in diese Gruppe",
+        "!erledigt": {
+            "SUCCESS": "Danke für deine Unterstützung. Vergiss bitte nicht dich in der ausgelegten Liste im lager der Rosi zu unterschreiben und die Fotos auf den google drive zu laden",
+            "FAIL": "Danke für deine Unterstützung. Die Wartung für diese Woche wurde bereits erledigt."
+        }
+    },
+    "periodic": {
+        "WEEKLY_MONDAY": "Hallo! Es ist wieder Montag und die wöchentliche Wartung für {KW} der Rosi steht an. Wenn du lust hast bei der Wartung zu unterstützen antworte auf diese Nachricht mit !erledigt. Wenn du Hilfe benötigst schreibe !hilfe",
+        "WEEKLY_FRIDAY": "Hallo! Es ist Freitag und die Wartung der Rosi steht noch aus für diese Woche. Wenn du lust hast bei der Wartung zu unterstützen antworte auf diese Nachricht mit !erledigt. Wenn du Hilfe benötigst schreibe !hilfe"
+    }
+}

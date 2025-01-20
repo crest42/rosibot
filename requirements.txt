@@ -1,3 +1,4 @@
 signalbot
 pydantic-settings
 asyncio
+redis

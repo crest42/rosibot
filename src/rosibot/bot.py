@@ -1,20 +1,22 @@
 """Main Bot implementation
 """
 
-from typing import Callable
+from typing import Awaitable, Callable, Any
 
 import datetime
-import os
 import asyncio
-from pathlib import Path
 import logging
+from enum import IntEnum
 
-from signalbot import SignalBot, Command, Context  # type: ignore
+import redis
+from signalbot import SignalBot, Command, Context
 
 from rosibot.messages import Messages
 from rosibot.settings import Settings
 
 messages = Messages()
+_settings = Settings()
+
 BOT_COMMAND_DELIMITER = "!"
 
 MONDAY = 0
@@ -23,30 +25,56 @@ LOCK_FILE_PATH = "/tmp"
 ROSIBOT_PREFIX = "[ROSIBOT]: "
 MAX_COMMAND_LENGTH = 128
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+cache = redis.Redis(host="localhost", port=6379, db=0)
 
 
-def get_weekly_lock_file() -> tuple[int, int, str]:
-    """Returns some ad-hoc date information used to handle file based locking
+def today() -> tuple[int, int, int]:
+    """Returns some ad-hoc date information used to handle cache based locking
 
     Returns:
-        Tuple[int, int, str]: Tuple of weekday (0-6), week number (0-42) and a filename used for weekly locking
+        Tuple[int, int]: Tuple of yer, weekday (0-6), week number (0-42)
     """
-    today = datetime.datetime.today()
-    file = f"{LOCK_FILE_PATH}/rosibot_{today.year}_{today.isocalendar().week}"
-    return (today.weekday(), today.isocalendar().week, file)
+    _today = datetime.datetime.today()
+    return (_today.year, _today.weekday(), _today.isocalendar().week)
 
 
-command_registry: dict[str, Callable] = {}
+def get_cache_key(year: int, week: int) -> str:
+    """Returns weekly cache key, used to remember if a periodic message needs to be sent"""
+    return f"{year}{week}"
 
 
-def register_command(command):
+if _settings.debug:
+    logger.warning(
+        "DEBUG MODE ENABLED. "
+        "WILL CLEAR WEEKLY CACHE. "
+        "THIS RESULTS IN ALL PERIODIC MESSAGES BEING RESENT. "
+        "BE CAREFUL TO AVOID SPAM"
+    )
+    year_, _, week_ = today()
+    cache_key_ = get_cache_key(year_, week_)
+    cache.delete(cache_key_)
+
+command_registry: dict[str, Callable[[Any, Any], Awaitable[Any]]] = {}
+
+
+class PeriodicState(IntEnum):
+    """Small state machines used to send periodic messages. Needs some work"""
+
+    NONE = -1
+    FRESH = 0
+    REMINDER_SENT = 1
+    DONE = 2
+
+
+def register_command(command: str) -> Callable[..., None]:
     """Adds a command and the proper handler function to a global registry"""
     if command in command_registry:
         raise RuntimeError(
             f"Command {command} is already registered at {command_registry[command]}"
         )
 
-    def _register(func):
+    def _register(func: Callable[[Any, Any], Awaitable[Any]]) -> None:
         command_registry[command] = func
 
     return _register
@@ -126,59 +154,74 @@ class RosiBot(Command):
         i = 0
         while True:
             logger.debug(f"Running Periodic Task iteration {i}")
-            weekday, week, file_name = get_weekly_lock_file()
+            year, weekday, week = today()
+            cache_key = get_cache_key(year, week)
+            cache_value = cache.get(cache_key)
             if weekday == MONDAY:
-                if os.path.isfile(file_name):
+                if cache_value is not None:
                     logger.debug("Weekly maintenance message already sent. Do nothing")
                 else:
                     logger.info(
                         "Monday maintenance reminder for this week not sent yet. Create Lock file and send reminder."
                     )
-                    with open(file_name, "w", encoding="utf-8") as file:
-                        file.write("")
+                    cache.set(cache_key, PeriodicState.FRESH.value)
                     message = messages.get_periodic_message("WEEKLY_MONDAY")
                     await self.send(message.format(KW=f"KW {week}"))
             if weekday == FRIDAY:
-                if os.path.isfile(file_name):
-                    with open(file_name, "r", encoding="utf-8") as file:
-                        content = file.read()
-                        if len(content) == 0:
-                            logger.info(
-                                "Friday maintenance reminder for this week not sent yet. "
-                                "Create Lock file and send reminder."
-                            )
-                            message = messages.get_periodic_message("WEEKLY_FRIDAY")
-                            await self.send(message)
-                            file.write(str(FRIDAY))
+                if cache_value is not None:
+                    state = PeriodicState.FRESH.value
+                    try:
+                        state = int(cache_value.decode("utf-8"))
+                    except TypeError:
+                        logger.error(
+                            "Could not fetch cache content. Error while casting to int"
+                        )
+                        return
+                    if state == PeriodicState.FRESH.value:
+                        logger.info(
+                            "Friday maintenance reminder for this week not sent yet. "
+                            "Create Lock file and send reminder."
+                        )
+                        message = messages.get_periodic_message("WEEKLY_FRIDAY")
+                        await self.send(message)
+                        cache.set(cache_key, PeriodicState.REMINDER_SENT.value)
                 else:
                     logger.warning(
                         "Its Friday and not weekly maintenance message is send yet. "
                         "This should not happen. Creating file anyway and send regular maintenance message!"
                     )
-                    Path(file_name).touch()
+                    cache.set(cache_key, PeriodicState.REMINDER_SENT.value)
                     message = messages.get_periodic_message("WEEKLY_MONDAY")
                     await self.send(message.format(KW=f"KW {week}"))
             i += 1
             await asyncio.sleep(seconds)
 
     @register_command("!hilfe")
-    async def _handle_help(self, command: str):
+    async def _handle_help(self, command: str) -> None:
         message, _ = messages.get_command_message(command)
         if message:
             await self.send(message)
 
     @register_command("!erledigt")
-    async def _handle_maintenance_done(self, command: str):
+    async def _handle_maintenance_done(self, command: str) -> None:
         message, fail = messages.get_command_message(command)
-        _, week, file = get_weekly_lock_file()
-        with open(file, "a", encoding="utf-8") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            if size <= 1:
-                logger.debug(f"Weekly maintenance for {week} done. Updating Log file")
-                f.write("Done")
-                await self.send(message)
-            else:
-                logger.debug(f"Weekly maintenance for {week} already done. Do nothing")
-                if fail:
-                    await self.send(fail)
+        year, _, week = today()
+        cache_key = get_cache_key(year, week)
+        cache_value = cache.get(cache_key)
+        state = PeriodicState.FRESH.value
+        if cache_value is not None:
+            try:
+                state = int(cache_value.decode("utf-8"))
+            except TypeError:
+                logger.error(
+                    "Could not fetch cache content. Error while casting to int"
+                )
+                return
+        if state != PeriodicState.DONE:
+            logger.debug(f"Weekly maintenance for {week} done. Updating Log file")
+            cache.set(cache_key, PeriodicState.DONE.value)
+            await self.send(message)
+        else:
+            logger.debug(f"Weekly maintenance for {week} already done. Do nothing")
+            if fail:
+                await self.send(fail)

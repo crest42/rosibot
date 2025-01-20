@@ -11,3 +11,4 @@ class Settings(BaseSettings):
     signal_service: str
     phone_number: str
     signal_group_id: str
+    debug: bool = False
